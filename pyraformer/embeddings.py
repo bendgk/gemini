@@ -50,11 +50,11 @@ class TemporalEmbedding(nn.Module):
 
 # Embedding for Gemini Financial Data
 class DataEmbedding(nn.Module):
-    def __init__(self, c_in, d_model, doupout=0.1):
+    def __init__(self, c_in, d_model, doupout=0.1, max_len=10000):
         super(DataEmbedding, self).__init__()
 
         self.token_embedding = TokenEmbedding(c_in, d_model)
-        self.position_embedding = PositionalEmbedding(d_model)
+        self.position_embedding = PositionalEmbedding(d_model, max_len=max_len)
         self.temporal_embedding = TemporalEmbedding(d_model)
 
         self.dropout = nn.Dropout(doupout)

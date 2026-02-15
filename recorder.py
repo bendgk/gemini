@@ -7,6 +7,7 @@ import os
 from datetime import datetime, timezone
 import logging
 from pathlib import Path
+import atexit
 
 # Configure logging
 logging.basicConfig(
@@ -30,6 +31,10 @@ class Recorder:
         
         # User specified Gemini Fast API endpoint
         self.ws_url = "wss://wsapi.fast.gemini.com"
+        
+        # Register exit handler
+        atexit.register(self.stop)
+
         
         # Binary format: >Qdddd (Big Endian: Timestamp(u64), Bid(f64), BidQty(f64), Ask(f64), AskQty(f64))
         # Size: 8 + 8 + 8 + 8 + 8 = 40 bytes
@@ -85,9 +90,38 @@ class Recorder:
             try:
                 data = struct.pack(self.struct_fmt, timestamp, bid, bid_qty, ask, ask_qty)
                 f.write(data)
-                # No flush here relying on OS buffering for performance
+                f.flush() # Ensure data is written to disk immediately for the reader
+                
+                # Update status file for IPC every 10 records or so to avoid too much I/O
+                # Ideally we do this async but for now simple counter is fine
+                if not hasattr(self, '_record_counters'):
+                    self._record_counters = {}
+                
+                self._record_counters[symbol] = self._record_counters.get(symbol, 0) + 1
+                
+                if self._record_counters[symbol] % 10 == 0:
+                    self._update_status(symbol, timestamp)
+                    
             except Exception as e:
                 logger.error(f"Error writing record for {symbol}: {e}")
+
+    def _update_status(self, symbol, timestamp):
+        """Update a JSON status file for the trainer to know where we are."""
+        try:
+            status_file = self.data_dir / symbol / "recorder_status.json"
+            status = {
+                "timestamp": timestamp,
+                "current_file": str(self.file_handles[symbol]['file'].name),
+                "last_update": time.time()
+            }
+            # Atomic write not strictly necessary but good practice
+            tmp_file = status_file.with_suffix('.tmp')
+            with open(tmp_file, 'w') as f:
+                json.dump(status, f)
+            os.replace(tmp_file, status_file)
+        except Exception as e:
+             # Don't crash recorder for status update failure
+            logger.warning(f"Failed to update status for {symbol}: {e}")
 
     async def _process_message(self, message):
         """Process incoming websocket message."""

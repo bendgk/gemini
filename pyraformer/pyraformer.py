@@ -34,12 +34,12 @@ class Encoder(nn.Module):
         return seq_enc
     
 class Model(nn.Module):
-    def __init__(self):
+    def __init__(self, input_size=168, predict_size=168):
         super().__init__()
 
         # input is observations, predictions is output
-        self.input_size = 168
-        self.predict_size = 168
+        self.input_size = input_size
+        self.predict_size = predict_size
 
         # model parameters
         self.d_model = 512
@@ -75,8 +75,14 @@ class Model(nn.Module):
             "device": self.device,
             "CSCM": self.CSCM,
             "d_bottleneck": self.d_bottleneck,
-            "enc_in": self.enc_in
+            "enc_in": self.enc_in,
+            "model": "Pyraformer",
+            "n_head": self.n_heads
         }
+        
+        # Convert dict to namespace for attribute access
+        from types import SimpleNamespace
+        self.opt = SimpleNamespace(**self.opt)
 
         self.encoder = Encoder(self.opt)
         mask = get_subsequent_mask(self.input_size, self.window_size, self.predict_size, False)

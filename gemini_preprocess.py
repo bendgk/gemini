@@ -5,91 +5,149 @@ import random
 from tqdm import trange
 from scipy import stats
 import struct
-from orderbook import OrderBook
-import time
+from datetime import datetime
 import torch
+from torch.utils.data import Dataset
 
-
-class GeminiDataset(torch.utils.data.Dataset):
-    def __init__(self, file_path):
-        with open(file_path, "rb") as f:
-            self.data = f.read()
-
-        #each transaction is 12 bytes unpacked in the struct format (bbbff)
-        # read 12 bytes at a time
-        size = struct.calcsize("Qbbbff")
-        self.num_transactions = len(self.data) // size
-        self.trades = []
-
-        for i in range(self.num_transactions):
-            # unpack the data
-            timestamp_ms, is_change, reason, side, price, amount = struct.unpack("Qbbbff", self.data[i*size:(i+1)*size])
-
-            print(timestamp_ms, is_change, reason, side, price, amount)
-            input()
-
-            side = "bid" if side == 0 else "ask"
-
-            #handle order book changes
-            if is_change:
-                order_book.set(side, price, amount)
-
-            else:
-                #trade
-                order_book.settle_trade(side, price, amount)
-
-                bids = order_book.bids.items()[::-1][0:32].copy()
-                asks = order_book.asks.items()[0:32].copy()
-
-                bid_prices = [b[0] for b in bids]
-                bid_amounts = [b[1] for b in bids]
-                ask_prices = [a[0] for a in asks]
-                ask_amounts = [a[1] for a in asks]
-
-                self.trades.append((timestamp_ms, price, amount, bid_prices, bid_amounts, ask_prices, ask_amounts))
+class GeminiDataset(Dataset):
+    def __init__(self, file_path, input_size=168, predict_size=168, train=True):
+        self.input_size = input_size
+        self.predict_size = predict_size
+        self.seq_len = input_size + predict_size
         
-        self.num_trades = len(self.trades)
+        # Read binary data
+        with open(file_path, "rb") as f:
+            self.raw_bytes = f.read()
+
+        # Binary format: >Qdddd (Timestamp, Bid, BidQty, Ask, AskQty)
+        # Big Endian
+        dt = np.dtype([
+            ('timestamp', '>u8'),
+            ('bid', '>f8'),
+            ('bid_qty', '>f8'),
+            ('ask', '>f8'),
+            ('ask_qty', '>f8')
+        ])
+        
+        self.data = np.frombuffer(self.raw_bytes, dtype=dt)
+        self.num_records = len(self.data)
+        
+        if self.num_records < self.seq_len:
+            raise ValueError(f"File {file_path} is too small ({self.num_records} records) for sequence length {self.seq_len}")
+
+        # Precompute features and covariates to save time during training
+        self._precompute_data()
+
+    def _precompute_data(self):
+        # Extract columns
+        timestamps = self.data['timestamp'].astype(np.float64) # Keep as float for calculations if needed, but we need int for datetime
+        bid = self.data['bid'].astype(np.float32)
+        bid_qty = self.data['bid_qty'].astype(np.float32)
+        ask = self.data['ask'].astype(np.float32)
+        ask_qty = self.data['ask_qty'].astype(np.float32)
+
+        # 1. Feature Engineering (7 features)
+        # 0: Bid Price
+        # 1: Bid Qty
+        # 2: Ask Price
+        # 3: Ask Qty
+        # 4: Mid Price
+        mid_price = (bid + ask) / 2.0
+        # 5: Spread
+        spread = ask - bid
+        # 6: Imbalance
+        # Avoid division by zero
+        total_qty = bid_qty + ask_qty
+        total_qty[total_qty == 0] = 1.0 
+        imbalance = (bid_qty - ask_qty) / total_qty
+
+        # Normalize Features (Z-score)
+        # Ideally we should compute mean/std on training set only and apply to val/test
+        # For this implementation, we'll normalize based on the loaded file (assuming it's a day's data)
+        # Note: Prices are non-stationary, so z-score might not be best, but acceptable for short-term windows.
+        # Ideally we'd use log-returns for prices. Let's start with simple Z-score for now as it handles scales.
+        
+        self.features = np.stack([bid, bid_qty, ask, ask_qty, mid_price, spread, imbalance], axis=1)
+        
+        mean = np.mean(self.features, axis=0)
+        std = np.std(self.features, axis=0)
+        std[std == 0] = 1.0 # Prevent div by zero
+        self.features = (self.features - mean) / std
+
+        # 2. Covariate Generation (4 covariates)
+        # Timestamps are in milliseconds
+        # Convert to seconds for datetime
+        timestamps_sec = self.data['timestamp'] / 1000.0
+        
+        # Vectorized datetime operations are tricky with standard numpy, 
+        # but iterating might be slow for millions of rows.
+        # We can use arithmetic for speed.
+        
+        # Second of minute (0-59)
+        cov_sec = (timestamps_sec % 60).astype(np.float32)
+        
+        # Minute of hour (0-59)
+        cov_min = ((timestamps_sec / 60) % 60).astype(np.float32)
+        
+        # Hour of day (0-23)
+        cov_hour = ((timestamps_sec / 3600) % 24).astype(np.float32)
+        
+        # Day of week (0-6)
+        # 1 day = 86400 seconds
+        # Unix epoch 1970-01-01 was Thursday (4)
+        cov_day = (((timestamps_sec // 86400) + 4) % 7).astype(np.float32)
+
+        # Normalize covariates? Usually embeddings handle raw integers or normalized.
+        # Pyraformer's TemporalEmbedding uses a Linear layer `nn.Linear(d_inp, d_model)`.
+        # So we can pass normalized values.
+        # Actually Pyraformer usually expects [-0.5, 0.5] or similar for time features if using uniform embedding,
+        # but here we have a Linear projection. Let's normalize to [-0.5, 0.5].
+        
+        self.covariates = np.stack([
+            cov_sec / 60.0 - 0.5,
+            cov_min / 60.0 - 0.5,
+            cov_hour / 24.0 - 0.5,
+            cov_day / 7.0 - 0.5
+        ], axis=1)
 
     def __len__(self):
-        return self.num_trades
-    
+        return self.num_records - self.seq_len + 1
+
     def __getitem__(self, idx):
-        trade = self.trades[idx]
-        price, amount, bid_prices, bid_amounts, ask_prices, ask_amounts = trade
-
-        # Convert to numpy arrays
-        bid_prices = np.array(bid_prices)
-        bid_amounts = np.array(bid_amounts)
-        ask_prices = np.array(ask_prices)
-        ask_amounts = np.array(ask_amounts)
-
-        # Normalize prices and amounts
-        bid_prices = (bid_prices - np.mean(bid_prices)) / np.std(bid_prices)
-        bid_amounts = (bid_amounts - np.mean(bid_amounts)) / np.std(bid_amounts)
-        ask_prices = (ask_prices - np.mean(ask_prices)) / np.std(ask_prices)
-        ask_amounts = (ask_amounts - np.mean(ask_amounts)) / np.std(ask_amounts)
-
-        return price, amount, bid_prices, bid_amounts, ask_prices, ask_amounts
-
-order_book = OrderBook()
-
-def prep_data(data, covariates, data_start, Train=True):
-    pass
-
-def gen_covariates(order_book: OrderBook):
-    bids = order_book.bids
-    asks = order_book.asks
-
-    covariates = np.zeros()
-    pass
+        # Window: [idx, idx + seq_len]
+        # features: (seq_len, 7)
+        # covariates: (seq_len, 4)
+        
+        x = self.features[idx : idx + self.seq_len]
+        t = self.covariates[idx : idx + self.seq_len]
+        
+        return torch.tensor(x, dtype=torch.float32), torch.tensor(t, dtype=torch.float32)
 
 if __name__ == '__main__':
-    time_start = time.time()
+    # Test the dataset
+    import sys
+    
+    # Create a dummy file if not exists for testing
+    test_file = "test_data.bin"
+    if not os.path.exists(test_file):
+        print("Creating dummy test file...")
+        with open(test_file, "wb") as f:
+            for i in range(1000):
+                ts = int(datetime.now().timestamp() * 1000) + i * 1000
+                bid = 50000.0 + random.random() * 100
+                bid_qty = 1.0 + random.random()
+                ask = bid + 10.0 # Spread
+                ask_qty = 1.0 + random.random()
+                f.write(struct.pack(">Qdddd", ts, bid, bid_qty, ask, ask_qty))
+    
+    dataset = GeminiDataset(test_file)
+    print(f"Dataset length: {len(dataset)}")
+    x, t = dataset[0]
+    print(f"Sample x shape: {x.shape}") # Should be (336, 7)
+    print(f"Sample t shape: {t.shape}") # Should be (336, 4)
+    print("Sample x[0]:", x[0])
+    print("Sample t[0]:", t[0])
 
-    dataset = GeminiDataset("data/data.bin")
-    print(len(dataset.trades))
-
-    print(f"Time taken: {time.time() - time_start} seconds")
 
 
         
