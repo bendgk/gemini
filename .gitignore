@@ -1,0 +1,7 @@
+.idea/**
+data/**
+__pycache__/**
+deprecated/**
+test.py
+recorder2.py
+recorder3.py
