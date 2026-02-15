@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  recorder:
+    build: .
+    container_name: gemini_recorder
+    command: python recorder.py --symbols btcusd
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  trainer:
+    build: .
+    container_name: gemini_trainer
+    command: python continuous_train.py --symbol btcusd --device cpu
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - recorder
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+
+# Note: Checkpoints will be saved in ./data/btcusd/checkpoints on the host
