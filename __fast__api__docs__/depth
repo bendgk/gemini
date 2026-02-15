@@ -1,0 +1,67 @@
+Get a snapshot of the order book depth for a specific symbol, showing the current bids and asks up to the specified limit. Response includes rate limit status showing current usage and limits for weight-based rate limiting.
+
+Parameters
+Name	Type	Required	Description
+symbol	string	required	Trading pair symbol (e.g., btcusd, ethusd)
+limit	number	optional	Number of price levels to return (max: 5000)(default: 100)
+
+Request: {
+    "id": "1",
+    "method": "depth",
+    "params": {
+        "symbol": "btcusd",
+        "limit": 5
+    }
+}
+
+Response: {
+    "id": "1",
+    "status": 200,
+    "result": {
+        "lastUpdateId": 1764525877237516,
+        "bids": [
+            [
+                "68691.18000",
+                "0.0219000000"
+            ],
+            [
+                "68688.82000",
+                "0.0162034600"
+            ],
+            [
+                "68683.49000",
+                "0.0219000000"
+            ],
+            [
+                "68678.84000",
+                "0.0382162300"
+            ],
+            [
+                "68676.27000",
+                "0.0200000000"
+            ]
+        ],
+        "asks": [
+            [
+                "68691.19000",
+                "0.0382162300"
+            ],
+            [
+                "68694.60000",
+                "0.0219000000"
+            ],
+            [
+                "68694.93000",
+                "0.1528649200"
+            ],
+            [
+                "68696.53000",
+                "0.0149806800"
+            ],
+            [
+                "68697.34000",
+                "0.0552250000"
+            ]
+        ]
+    }
+}

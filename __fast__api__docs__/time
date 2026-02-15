@@ -1,0 +1,18 @@
+Get the current server time in milliseconds since Unix epoch.
+
+Request:
+{
+  "id": "1",
+  "method": "time",
+  "params": {}
+}
+
+Response:
+{
+  "id": "1",
+  "status": 200,
+  "result": {
+    "serverTime": 1771191529490
+  }
+}
+

@@ -1,0 +1,15 @@
+Get a list of all active stream subscriptions for the current connection.
+
+Request:
+{
+    "id": "1",
+    "method": "list_subscriptions",
+    "params": {}
+}
+
+Response:
+{
+    "id": "1",
+    "status": 200,
+    "result": null
+}

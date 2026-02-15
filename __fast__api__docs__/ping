@@ -1,0 +1,15 @@
+Ping the server to check connectivity.
+
+Request:
+{
+  "id": "1",
+  "method": "ping",
+  "params": {}
+}
+
+Response:
+{
+  "id": "1",
+  "status": 200
+}
+

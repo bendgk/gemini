@@ -1,0 +1,20 @@
+Unsubscribe from a data streams. Multiple streams can be unsubscribed in a single request.
+
+Parameters
+Name	Type	Required	Description
+streams	array	required	Array of stream names to unsubscribe from
+
+Request:
+{
+  "id": "1",
+  "method": "unsubscribe",
+  "params": [
+    "btcusd@bookTicker"
+  ]
+}
+
+Response:
+{
+  "id": "1",
+  "status": 200
+}
