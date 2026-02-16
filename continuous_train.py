@@ -70,7 +70,7 @@ def main():
     parser = argparse.ArgumentParser(description='Continuous Pyraformer Training')
     parser.add_argument('--symbol', type=str, default='btcusd', help='Symbol to train on')
     parser.add_argument('--data_dir', type=str, default='data', help='Data directory')
-    parser.add_argument('--batch_size', type=int, default=8, help='Batch size (keep small for live updates)')
+    parser.add_argument('--batch_size', type=int, default=1, help='Batch size (keep small for live updates)')
     parser.add_argument('--lr', type=float, default=1e-5, help='Learning rate')
     parser.add_argument('--checkpoint_itv', type=int, default=100, help='Steps between checkpoints')
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
@@ -81,8 +81,8 @@ def main():
     print(f"Starting continuous training for {args.symbol} on {device}")
     
     # 1. Setup Dataset
-    input_size = 256
-    predict_size = 256
+    input_size = 2048
+    predict_size = 1024
     
     # We use batch_size 168 (seq len) in dataset but here batch_size is num sequences
     dataset = LiveGeminiDataset(args.data_dir, args.symbol, input_size=input_size, predict_size=predict_size)
@@ -98,7 +98,7 @@ def main():
         model = Model(input_size=input_size, predict_size=predict_size).to(device)
         
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    loss_fn = nn.MSELoss()
+    loss_fn = nn.HuberLoss(delta=1.0)
     
     # 3. Load Checkpoint
     checkpoint_dir = os.path.join(args.data_dir, args.symbol, "checkpoints")
@@ -131,8 +131,22 @@ def main():
             t_enc = covariates[:, :input_size, :]
             
             target = data[:, input_size:, :]
-            # Zero placeholder for decoder input
+            
+            # Decoder Initialization (Start Token)
+            # Use the last window_size (or similar small chunk) of encoder input to start decoder
+            # Pyraformer usually expects decoder input to be same size as target/predict_size
+            # We initialize it with zeros, but replacing the first few steps with history can help
+            # However, for standard Pyraformer, x_dec is usually just a placeholder or 
+            # contains the "start token" at the beginning if following Transformer convention.
+            # Here we will try to fill the first 50% with the last 50% of history to guide continuity
+            
             x_dec = torch.zeros_like(target).to(device)
+            
+            # Copy last half of encoder to first half of decoder (if sizes allow)
+            # This acts as a "reference" trajectory for the attention mechanism
+            label_len = input_size // 2
+            x_dec[:, :label_len, :] = x_enc[:, -label_len:, :]
+            
             t_dec = covariates[:, input_size:, :]
             
             # Train Step

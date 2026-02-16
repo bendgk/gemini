@@ -20,21 +20,59 @@ def prepare_dataloader(args):
     Load data and creating dataloaders.
     """
     print(f"Loading data from {args.data_path}...")
-    # Initialize dataset
-    # We use the default 168 input/predict size matching the Model definition
-    full_dataset = GeminiDataset(args.data_path, input_size=168, predict_size=168)
+    # Initialize dataset (Raw, unscaled)
+    # We use default input/predict size
+    # Note: GeminiDataset no longer auto-scales in __init__
+    full_dataset = GeminiDataset(args.data_path, input_size=2048, predict_size=1024)
     
-    # Split into train/val (80/20)
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_dataset, val_dataset = random_split(full_dataset, [train_size, val_size])
+    # Time-series split (Strictly past -> future)
+    # Train: 0 -> train_size
+    # Val: train_size -> end
+    total_len = len(full_dataset)
+    train_size = int(0.8 * total_len)
+    val_size = total_len - train_size
     
-    print(f"Train size: {len(train_dataset)}, Val size: {len(val_dataset)}")
+    print(f"Total samples: {total_len}. Train: {train_size}, Val: {val_size}")
+    
+    # Compute stats on TRAINING set only
+    # full_dataset.features is [N, 7]
+    # We need to map dataset indices to feature indices.
+    # Dataset[0] uses features[0 : seq_len]
+    # Dataset[train_size-1] uses features[train_size-1 : train_size-1+seq_len]
+    # So the training period covers features[0 : train_size + seq_len - 1] basically?
+    # Actually simpler: standard practice is to compute mean/std on the features *available* for training.
+    # Since we split by sample index, let's look at the range of time covered by train set.
+    
+    # Determine the end index of the raw features used by the last training sample
+    # last_train_sample_idx = train_size - 1
+    # It covers features up to last_train_sample_idx + seq_len
+    # But wait, if we use the *future* targets of the last training sample to compute stats, 
+    # we are technically using data that overlaps with the start of validation inputs?
+    # Yes, in sliding window, there is overlap.
+    # Strict approach: Compute stats on features[0 : train_size] (roughly). 
+    # Or features corresponding to the timestamps strictly before validation starts.
+    # Let's use the first train_size rows of features to compute stats.
+    # This is safe and sufficient.
+    
+    train_features = full_dataset.features[:train_size]
+    mean = np.mean(train_features, axis=0)
+    std = np.std(train_features, axis=0)
+    
+    print(f"Computed Normalization Stats (Train only):\nMean: {mean}\nStd: {std}")
+    
+    # Apply normalization to the ENTIRE dataset using TRAIN stats
+    full_dataset.normalize(mean, std)
+    
+    # Create Subsets using indices
+    # We cannot use random_split for time series
+    idxs = list(range(total_len))
+    train_dataset = torch.utils.data.Subset(full_dataset, idxs[:train_size])
+    val_dataset = torch.utils.data.Subset(full_dataset, idxs[train_size:])
     
     train_loader = DataLoader(
         train_dataset, 
         batch_size=args.batch_size, 
-        shuffle=True, 
+        shuffle=True, # Shuffle training samples is fine, as long as we don't leak future into stats
         num_workers=args.num_workers,
         pin_memory=True if torch.cuda.is_available() else False
     )
@@ -42,7 +80,7 @@ def prepare_dataloader(args):
     val_loader = DataLoader(
         val_dataset, 
         batch_size=args.batch_size, 
-        shuffle=False, 
+        shuffle=False, # Don't shuffle val
         num_workers=args.num_workers,
         pin_memory=True if torch.cuda.is_available() else False
     )
@@ -108,6 +146,8 @@ def train_epoch(model, train_loader, optimizer, loss_fn, epoch, device):
         # or the "last observed value" repeated.
         # Let's use zeros for simplicity as done in many Informer/Pyraformer implementations.
         x_dec = torch.zeros_like(target).to(device)
+        label_len = input_size // 2
+        x_dec[:, :label_len, :] = x_enc[:, -label_len:, :]
         t_dec = covariates[:, input_size:, :]
         
         optimizer.zero_grad()
@@ -150,6 +190,8 @@ def eval_epoch(model, val_loader, loss_fn, epoch, device):
             
             target = data[:, input_size:, :]
             x_dec = torch.zeros_like(target).to(device)
+            label_len = input_size // 2
+            x_dec[:, :label_len, :] = x_enc[:, -label_len:, :]
             t_dec = covariates[:, input_size:, :]
             
             pred = model(x_enc, t_enc, x_dec, t_dec, pretrain=False)
@@ -188,13 +230,13 @@ def main():
     train_loader, val_loader = prepare_dataloader(args)
     
     # Setup Model
-    model = pyraformer.Model().to(device)
+    model = pyraformer.Model(input_size=2048, predict_size=1024).to(device)
     
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     
     # Loss
-    loss_fn = nn.MSELoss()
+    loss_fn = nn.HuberLoss(delta=1.0)
     
     print("Starting training...")
     for epoch in range(1, args.epochs + 1):

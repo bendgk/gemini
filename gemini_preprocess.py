@@ -69,20 +69,12 @@ class GeminiDataset(Dataset):
         
         self.features = np.stack([bid, bid_qty, ask, ask_qty, mid_price, spread, imbalance], axis=1)
         
-        mean = np.mean(self.features, axis=0)
-        std = np.std(self.features, axis=0)
-        std[std == 0] = 1.0 # Prevent div by zero
-        self.features = (self.features - mean) / std
-
         # 2. Covariate Generation (4 covariates)
         # Timestamps are in milliseconds
         # Convert to seconds for datetime
         timestamps_sec = self.data['timestamp'] / 1000.0
         
-        # Vectorized datetime operations are tricky with standard numpy, 
-        # but iterating might be slow for millions of rows.
-        # We can use arithmetic for speed.
-        
+        # Vectorized datetime operations
         # Second of minute (0-59)
         cov_sec = (timestamps_sec % 60).astype(np.float32)
         
@@ -93,22 +85,30 @@ class GeminiDataset(Dataset):
         cov_hour = ((timestamps_sec / 3600) % 24).astype(np.float32)
         
         # Day of week (0-6)
-        # 1 day = 86400 seconds
-        # Unix epoch 1970-01-01 was Thursday (4)
         cov_day = (((timestamps_sec // 86400) + 4) % 7).astype(np.float32)
 
-        # Normalize covariates? Usually embeddings handle raw integers or normalized.
-        # Pyraformer's TemporalEmbedding uses a Linear layer `nn.Linear(d_inp, d_model)`.
-        # So we can pass normalized values.
-        # Actually Pyraformer usually expects [-0.5, 0.5] or similar for time features if using uniform embedding,
-        # but here we have a Linear projection. Let's normalize to [-0.5, 0.5].
-        
         self.covariates = np.stack([
             cov_sec / 60.0 - 0.5,
             cov_min / 60.0 - 0.5,
             cov_hour / 24.0 - 0.5,
             cov_day / 7.0 - 0.5
         ], axis=1)
+
+    def normalize(self, mean=None, std=None):
+        """
+        Normalize features.
+        If mean/std are provided, use them.
+        If not, compute them from current data (be careful of leakage!).
+        Returns mean, std used.
+        """
+        if mean is None:
+            mean = np.mean(self.features, axis=0)
+        if std is None:
+            std = np.std(self.features, axis=0)
+            
+        std[std == 0] = 1.0 # Prevent div by zero
+        self.features = (self.features - mean) / std
+        return mean, std
 
     def __len__(self):
         return self.num_records - self.seq_len + 1
@@ -132,7 +132,7 @@ if __name__ == '__main__':
     if not os.path.exists(test_file):
         print("Creating dummy test file...")
         with open(test_file, "wb") as f:
-            for i in range(1000):
+            for i in range(5000):
                 ts = int(datetime.now().timestamp() * 1000) + i * 1000
                 bid = 50000.0 + random.random() * 100
                 bid_qty = 1.0 + random.random()

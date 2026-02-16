@@ -15,7 +15,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from live_dataset import LiveGeminiDataset
 from execution.gemini_client import GeminiClient, MockGeminiClient
-from strategies.model_strategy import ModelStrategy
+from strategies.voting_strategy import VotingStrategy
 from risk.risk_manager import RiskManager
 from strategies.base_strategy import Signal
 
@@ -35,7 +35,8 @@ class MockDataset(IterableDataset):
         self.predict_size = predict_size
         self.seq_len = input_size + predict_size
         # Mock scaler
-        self.scaler = type('obj', (object,), {'load_state_dict': lambda x: None})
+        from types import SimpleNamespace
+        self.scaler = SimpleNamespace(n=0, mean=0, M2=0, load_state_dict=lambda x: None)
 
     def __iter__(self):
         while True:
@@ -97,6 +98,7 @@ class TradingEngine:
         self.history = {
             'steps': [],
             'portfolio_values': [],
+            'hold_values': [], # Passive Hold Strategy
             'prices': [],
             'signals': [] # list of (step, type, price)
         }
@@ -116,11 +118,11 @@ class TradingEngine:
         self.risk_manager = RiskManager()
         
         # 3. Setup Strategy
-        self.strategy = ModelStrategy(symbol, buy_threshold=buy_threshold, sell_threshold=sell_threshold)
+        self.strategy = VotingStrategy(symbol, buy_threshold=buy_threshold, sell_threshold=sell_threshold)
         
         # 4. Setup Data
-        self.input_size = 256
-        self.predict_size = 256
+        self.input_size = 2048
+        self.predict_size = 1024
         
         if self.mock_data:
             logger.info("Using Mock Dataset")
@@ -138,10 +140,10 @@ class TradingEngine:
         logger.info(f"Loading model from {checkpoint_path}")
         # Assuming Pyraformer architecture
         if hasattr(pyraformer, 'Model'):
-            model = pyraformer.Model(input_size=256, predict_size=256).to(self.device)
+            model = pyraformer.Model(input_size=2048, predict_size=1024).to(self.device)
         else:
             from pyraformer.pyraformer import Model
-            model = Model(input_size=256, predict_size=256).to(self.device)
+            model = Model(input_size=2048, predict_size=1024).to(self.device)
             
         try:
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
@@ -151,8 +153,9 @@ class TradingEngine:
                 model.load_state_dict(checkpoint)
             # Load scaler if available
             if 'scaler_state_dict' in checkpoint:
-                self.dataset.scaler.load_state_dict(checkpoint['scaler_state_dict'])
-                logger.info("Scaler state loaded from checkpoint")
+                if hasattr(self.dataset, 'scaler'):
+                    self.dataset.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+                    logger.info("Scaler state loaded from checkpoint")
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             raise e
@@ -161,7 +164,7 @@ class TradingEngine:
         model.eval()
         return model
 
-    def visualize_step(self, step, inputs, targets, prediction, signal):
+    def visualize_step(self, step, inputs, targets, prediction, signal, portfolio_value=None, initial_portfolio_value=0.0):
         """Visualize current step using matplotlib."""
         try:
             # Inputs: [batch, input_size, 7] -> take batch 0, feature 0 (Bid)
@@ -217,9 +220,15 @@ class TradingEngine:
                 
                 # Plot Portfolio Value on left y-axis
                 color = 'tab:blue'
-                ax2.plot(self.history['steps'], self.history['portfolio_values'], color=color, label='Portfolio Value ($)')
+                ax2.plot(self.history['steps'], self.history['portfolio_values'], color=color, label='Model Portfolio ($)')
+                
+                # Plot Hold Strategy Value
+                if len(self.history['hold_values']) > 0:
+                    ax2.plot(self.history['steps'], self.history['hold_values'], color='orange', linestyle='--', label='Buy & Hold ($)')
+                
                 ax2.tick_params(axis='y', labelcolor=color)
-                ax2.set_ylabel('Portfolio Value ($)', color=color)
+                ax2.set_ylabel('Value ($)', color=color)
+                ax2.legend(loc='upper left')
                 
                 # Plot Price on right y-axis
                 ax3 = ax2.twinx() 
@@ -235,7 +244,22 @@ class TradingEngine:
                     # Plot on Price axis
                     ax3.scatter(s_step, s_price, color=color, marker=marker, s=50, zorder=5)
 
-            plt.tight_layout()
+            # --- Display PnL at the bottom ---
+            if portfolio_value is not None and initial_portfolio_value > 0:
+                profit = portfolio_value - initial_portfolio_value
+                profit_pct = (profit / initial_portfolio_value) * 100
+                pnl_color = 'green' if profit >= 0 else 'red'
+                pnl_text = f"Current Portfolio: ${portfolio_value:,.2f}  |  PnL: ${profit:,.2f} ({profit_pct:+.2f}%)"
+                
+                # Add text box at the bottom of the figure
+                plt.figtext(0.5, 0.02, pnl_text, ha='center', fontsize=14, 
+                            bbox={"facecolor": pnl_color, "alpha": 0.2, "pad": 5},
+                            color='black', weight='bold')
+                            
+                # Adjust layout to make room for text
+                plt.subplots_adjust(bottom=0.1)
+            else:
+                plt.tight_layout()
             
             # Save to file
             out_dir = os.path.join(self.data_dir, self.symbol, "visualization")
@@ -294,8 +318,33 @@ class TradingEngine:
             balances = self.client.get_balances()
             if balances:
                 self.risk_manager.sync_positions(balances)
+                
+            # Capture Initial Portfolio Value for PnL calculation
+            # We need current price for this. Fetch ticker once.
+            ticker = self.client.get_ticker(self.symbol)
+            if ticker and balances:
+                usd_bal = 0
+                btc_bal = 0
+                for b in balances:
+                    if b['currency'] == 'USD': usd_bal += float(b['available'])
+                    if b['currency'] == 'BTC': btc_bal += float(b['available'])
+                last_price = float(ticker['last'])
+                
+                self.initial_usd = usd_bal
+                self.initial_btc = btc_bal
+                self.initial_portfolio_value = usd_bal + (btc_bal * last_price)
+                logger.info(f"Initial Portfolio: ${self.initial_portfolio_value:,.2f} (USD: ${usd_bal:,.2f}, BTC: {btc_bal:.4f})")
+            else:
+                self.initial_portfolio_value = 0.0
+                self.initial_usd = 0.0
+                self.initial_btc = 0.0
+                logger.warning("Could not calculate initial portfolio value.")
+                
         except Exception as e:
             logger.error(f"Failed to sync balances: {e}")
+            self.initial_portfolio_value = 0.0
+            self.initial_usd = 0.0
+            self.initial_btc = 0.0
         
         step = 0
         try:
@@ -328,10 +377,12 @@ class TradingEngine:
                     x_enc = data[:, -self.input_size:, :] 
                     t_enc = covariates[:, -self.input_size:, :]
                     
-                    # For Decoder, we don't have future GT.
-                    # x_dec should be some placeholder (e.g., zeros or last value)
-                    # Pyraformer usually expects [batch, predict_size, 7]
                     x_dec = torch.zeros((data.shape[0], self.predict_size, 7)).to(self.device)
+                    
+                    # Decoder Initialization (Start Token)
+                    # Copy last half of encoder to first half of decoder (if sizes allow)
+                    label_len = self.input_size // 2
+                    x_dec[:, :label_len, :] = x_enc[:, -label_len:, :]
                     
                     # For t_dec (Future Covariates), we MUST extrapolate into the future
                     # Using t_enc.clone() feeds PAST time to FUTURE prediction, confusing the model
@@ -424,9 +475,11 @@ class TradingEngine:
                        if b['currency'] == 'BTC': btc_bal += float(b['available'])
                     
                     portfolio_value = usd_bal + (btc_bal * current_price)
+                    hold_value = self.initial_usd + (self.initial_btc * current_price)
                     
                     self.history['steps'].append(step)
                     self.history['portfolio_values'].append(portfolio_value)
+                    self.history['hold_values'].append(hold_value)
                     self.history['prices'].append(current_price)
                     
                     if signal and signal.type in ['BUY', 'SELL']:
@@ -435,7 +488,13 @@ class TradingEngine:
                     
                     # Log every 10 steps
                     if step % 10 == 0:
-                        logger.info(f"Step {step} | Portfolio Value: ${portfolio_value:,.2f} | USD: ${usd_bal:,.2f} BTC: {btc_bal:.4f} | Price: ${current_price:,.2f}")
+                        # Calculate Profit
+                        if self.initial_portfolio_value > 0:
+                            profit = portfolio_value - self.initial_portfolio_value
+                            profit_pct = (profit / self.initial_portfolio_value) * 100
+                            logger.info(f"Step {step} | Portfolio: ${portfolio_value:,.2f} | Profit: ${profit:,.2f} ({profit_pct:+.2f}%) | USD: ${usd_bal:,.2f} BTC: {btc_bal:.4f} | Price: ${current_price:,.2f}")
+                        else:
+                            logger.info(f"Step {step} | Portfolio: ${portfolio_value:,.2f} | USD: ${usd_bal:,.2f} BTC: {btc_bal:.4f} | Price: ${current_price:,.2f}")
                         
                 except Exception as e:
                     logger.warning(f"Failed to update history: {e}")
@@ -450,7 +509,7 @@ class TradingEngine:
                      # Reshape for compatibility with existing visualize_step signature which expects [batch, seq, feat]
                      input_vis = torch.tensor(input_data).unsqueeze(0).to(self.device)
                      
-                     self.visualize_step(step, input_vis, None, prediction, signal)
+                     self.visualize_step(step, input_vis, None, prediction, signal, portfolio_value, self.initial_portfolio_value)
 
                 if step % 10 == 0:
                     logger.info(f"Step {step} completed. Monitoring...")
@@ -476,7 +535,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     
     # Path to latest checkpoint
-    checkpoint_path = os.path.join(args.data_dir, args.symbol, "checkpoints", "latest.pth")
+    #checkpoint_path = os.path.join(args.data_dir, args.symbol, "checkpoints", "latest.pth")
+    checkpoint_path = "pyraformer_checkpoint.pth"
     
     if not os.path.exists(checkpoint_path):
         print(f"No model checkpoint found at {checkpoint_path}")
