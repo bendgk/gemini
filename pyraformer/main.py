@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from tqdm import tqdm
+from torch.cuda.amp import GradScaler, autocast
 
 # Add parent directory to path to import gemini_preprocess
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -73,7 +74,7 @@ def prepare_dataloader(args):
         train_dataset, 
         batch_size=args.batch_size, 
         shuffle=True, # Shuffle training samples is fine, as long as we don't leak future into stats
-        num_workers=args.num_workers,
+        num_workers=8,
         pin_memory=True if torch.cuda.is_available() else False
     )
     
@@ -81,13 +82,13 @@ def prepare_dataloader(args):
         val_dataset, 
         batch_size=args.batch_size, 
         shuffle=False, # Don't shuffle val
-        num_workers=args.num_workers,
+        num_workers=8,
         pin_memory=True if torch.cuda.is_available() else False
     )
     
     return train_loader, val_loader
 
-def train_epoch(model, train_loader, optimizer, loss_fn, epoch, device):
+def train_epoch(model, train_loader, optimizer, loss_fn, epoch, device, scaler):
     model.train()
     total_loss = 0
     progress_bar = tqdm(train_loader, desc=f"Epoch {epoch} [Train]", leave=False)
@@ -160,14 +161,16 @@ def train_epoch(model, train_loader, optimizer, loss_fn, epoch, device):
         # But for forecasting, likely False.
         # Let's try pretrain=False to get `pred = predictor(dec_enc)`
         
-        pred = model(x_enc, t_enc, x_dec, t_dec, pretrain=False)
+        with autocast():
+            pred = model(x_enc, t_enc, x_dec, t_dec, pretrain=False)
+            
+            # pred shape should be [batch, predict_size, enc_in] usually
+            
+            loss = loss_fn(pred, target)
         
-        # pred shape should be [batch, predict_size, enc_in] usually
-        
-        loss = loss_fn(pred, target)
-        
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
         
         total_loss += loss.item()
         progress_bar.set_postfix({'loss': loss.item()})
@@ -194,9 +197,10 @@ def eval_epoch(model, val_loader, loss_fn, epoch, device):
             x_dec[:, :label_len, :] = x_enc[:, -label_len:, :]
             t_dec = covariates[:, input_size:, :]
             
-            pred = model(x_enc, t_enc, x_dec, t_dec, pretrain=False)
-            
-            loss = loss_fn(pred, target)
+            with autocast():
+                pred = model(x_enc, t_enc, x_dec, t_dec, pretrain=False)
+                
+                loss = loss_fn(pred, target)
             total_loss += loss.item()
             
     return total_loss / len(val_loader)
@@ -226,11 +230,21 @@ def main():
     device = torch.device(args.device)
     print(f"Using device: {device}")
     
+    # TF32
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+    
     # Setup Data
     train_loader, val_loader = prepare_dataloader(args)
     
     # Setup Model
     model = pyraformer.Model(input_size=2048, predict_size=1024).to(device)
+    
+    # Compile model if available (PyTorch 2.0+)
+    if hasattr(torch, 'compile'):
+        print("Compiling model with torch.compile...")
+        model = torch.compile(model)
     
     # Optimizer
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
@@ -238,11 +252,14 @@ def main():
     # Loss
     loss_fn = nn.HuberLoss(delta=1.0)
     
+    # Scaler for AMP
+    scaler = GradScaler()
+    
     print("Starting training...")
     for epoch in range(1, args.epochs + 1):
         start_time = time.time()
         
-        train_loss = train_epoch(model, train_loader, optimizer, loss_fn, epoch, device)
+        train_loss = train_epoch(model, train_loader, optimizer, loss_fn, epoch, device, scaler)
         val_loss = eval_epoch(model, val_loader, loss_fn, epoch, device)
         
         print(f"Epoch {epoch} | Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f} | Time: {time.time() - start_time:.2f}s")

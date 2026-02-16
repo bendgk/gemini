@@ -6,3 +6,7 @@ test.py
 recorder2.py
 recorder3.py
 docker_data/**
+
+**/__pycache__/**
+pyraformer_checkpoint.pth
+test_data.bin
