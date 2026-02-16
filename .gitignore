@@ -10,3 +10,6 @@ docker_data/**
 **/__pycache__/**
 pyraformer_checkpoint.pth
 test_data.bin
+
+cpp/libtorch/**
+cpp/build/**
