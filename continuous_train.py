@@ -81,8 +81,8 @@ def main():
     print(f"Starting continuous training for {args.symbol} on {device}")
     
     # 1. Setup Dataset
-    input_size = 8192
-    predict_size = 1024
+    input_size = 256
+    predict_size = 256
     
     # We use batch_size 168 (seq len) in dataset but here batch_size is num sequences
     dataset = LiveGeminiDataset(args.data_dir, args.symbol, input_size=input_size, predict_size=predict_size)

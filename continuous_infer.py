@@ -132,8 +132,8 @@ def main():
     print(f"Starting continuous inference for {args.symbol} on {device}")
     
     # 1. Setup Dataset
-    input_size = 8192
-    predict_size = 1024
+    input_size = 256
+    predict_size = 256
     
     # Use same parameters as training
     dataset = LiveGeminiDataset(args.data_dir, args.symbol, input_size=input_size, predict_size=predict_size)

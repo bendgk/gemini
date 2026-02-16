@@ -107,21 +107,31 @@ class Recorder:
 
     def _update_status(self, symbol, timestamp):
         """Update a JSON status file for the trainer to know where we are."""
-        try:
-            status_file = self.data_dir / symbol / "recorder_status.json"
-            status = {
-                "timestamp": timestamp,
-                "current_file": str(self.file_handles[symbol]['file'].name),
-                "last_update": time.time()
-            }
-            # Atomic write not strictly necessary but good practice
-            tmp_file = status_file.with_suffix('.tmp')
-            with open(tmp_file, 'w') as f:
-                json.dump(status, f)
-            os.replace(tmp_file, status_file)
-        except Exception as e:
-             # Don't crash recorder for status update failure
-            logger.warning(f"Failed to update status for {symbol}: {e}")
+        status_file = self.data_dir / symbol / "recorder_status.json"
+        status = {
+            "timestamp": timestamp,
+            "current_file": str(self.file_handles[symbol]['file'].name),
+            "last_update": time.time()
+        }
+        
+        # Atomic write with retries for Windows file locking
+        max_retries = 3
+        for i in range(max_retries):
+            try:
+                # Atomic write not strictly necessary but good practice
+                tmp_file = status_file.with_suffix('.tmp')
+                with open(tmp_file, 'w') as f:
+                    json.dump(status, f)
+                os.replace(tmp_file, status_file)
+                return # Success
+            except PermissionError:
+                if i < max_retries - 1:
+                    time.sleep(0.01) # Short sleep before retry
+                else:
+                    logger.warning(f"Failed to update status for {symbol} due to file lock")
+            except Exception as e:
+                logger.warning(f"Failed to update status for {symbol}: {e}")
+                return
 
     async def _process_message(self, message):
         """Process incoming websocket message."""

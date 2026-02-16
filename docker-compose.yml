@@ -6,21 +6,30 @@ services:
     container_name: gemini_recorder
     command: python recorder.py --symbols btcusd
     volumes:
-      - ./data:/app/data
+      - ./docker_data:/app/data
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
 
   trainer:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.train
     container_name: gemini_trainer
-    command: python continuous_train.py --symbol btcusd --device cpu
+    command: python continuous_train.py --symbol btcusd --device cuda
     volumes:
-      - ./data:/app/data
+      - ./docker_data:/app/data
     depends_on:
       - recorder
-    restart: unless-stopped
+    #restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 # Note: Checkpoints will be saved in ./data/btcusd/checkpoints on the host

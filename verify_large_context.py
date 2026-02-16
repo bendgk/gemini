@@ -48,8 +48,8 @@ def verify_inference():
 
     # Initialize Dataset
     print("Initializing dataset...")
-    input_size = 8192
-    predict_size = 1024
+    input_size = 256
+    predict_size = 256
     
     dataset = LiveGeminiDataset(data_dir, symbol, input_size=input_size, predict_size=predict_size)
     dataloader = DataLoader(dataset, batch_size=1, num_workers=0)

@@ -34,7 +34,7 @@ class Encoder(nn.Module):
         return seq_enc
     
 class Model(nn.Module):
-    def __init__(self, input_size=168, predict_size=168):
+    def __init__(self, input_size=168, predict_size=168, d_model=512, d_inner_hid=512, d_k=128, d_v=128, n_head=6, n_layer=6, window_size=[4, 4, 4], dropout=0.05):
         super().__init__()
 
         # input is observations, predictions is output
@@ -42,18 +42,18 @@ class Model(nn.Module):
         self.predict_size = predict_size
 
         # model parameters
-        self.d_model = 512
-        self.window_size = [4, 4, 4]
+        self.d_model = d_model
+        self.window_size = window_size
         self.inner_size = 3
-        self.d_inner_hid = 512
-        self.n_heads = 6
-        self.n_layer = 6
-        self.dropout = 0.05
+        self.d_inner_hid = d_inner_hid
+        self.n_heads = n_head
+        self.n_layer = n_layer
+        self.dropout = dropout
 
         self.enc_in = 7
 
-        self.d_k = 128
-        self.d_v = 128
+        self.d_k = d_k
+        self.d_v = d_v
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
